@@ -1,10 +1,13 @@
-# 选择策略对照：中等负载，并发上限 16，留出稳定队列。
+# 选择策略对照：中等负载，并发上限 8，留出稳定队列。
 # 用于比较 FIFO 和最高响应比优先，两组使用同一份场景。
 name: mixed_hrrn
 seed: 42
 num_tasks: 200
 batch_interval: 0.1
 max_concurrency: 8
+selection_policy: hrrn
+cold_start_ms: 500
+predictor_window: 32
 
 steps:
   min: 1

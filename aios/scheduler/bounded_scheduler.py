@@ -34,6 +34,7 @@ class BoundedScheduler(FIFOScheduler):
         *args: Any,
         max_concurrency: int = 4,
         selection: Optional[Callable[[List[Any], float], int]] = None,
+        predictor: Any = None,
         request_timeout: Optional[float] = None,
         **kwargs: Any,
     ) -> None:
@@ -43,6 +44,7 @@ class BoundedScheduler(FIFOScheduler):
         super().__init__(*args, **kwargs)
         self.max_concurrency = max_concurrency
         self.selection = selection
+        self.predictor = predictor
         self.request_timeout = request_timeout
 
         self._waiting: List[Any] = []
@@ -83,27 +85,33 @@ class BoundedScheduler(FIFOScheduler):
                     # 与批次调度器共用 batch 事件，表示请求被调度器取走。
                     probe.emit("batch", syscall=syscall)
                     probe.emit("admit", syscall=syscall, in_flight=len(self._in_flight))
+                    if self.predictor is not None:
+                        probe.emit(
+                            "predict",
+                            syscall=syscall,
+                            predicted_ms=round(self.predictor.predict(syscall), 3),
+                        )
                     starts.append(syscall)
 
                 if not starts:
                     self._cv.wait(0.05)
 
             for syscall in starts:
-                self._start_worker(syscall)
+                self._start_worker(syscall, now)
 
             if self.request_timeout:
                 self._expire_in_flight()
 
-    def _start_worker(self, syscall: Any) -> None:
+    def _start_worker(self, syscall: Any, started: float) -> None:
         thread = threading.Thread(
             target=self._run_worker,
-            args=(syscall,),
+            args=(syscall, started),
             name="BoundedWorker",
             daemon=True,
         )
         thread.start()
 
-    def _run_worker(self, syscall: Any) -> None:
+    def _run_worker(self, syscall: Any, started: float) -> None:
         try:
             # 单请求走适配器原有路径，路由、异常分类和结果写回保持一致。
             self.llm.execute_llm_syscalls([syscall])
@@ -115,6 +123,9 @@ class BoundedScheduler(FIFOScheduler):
             except Exception:
                 syscall.event.set()
         finally:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            if self.predictor is not None:
+                self.predictor.observe(syscall, elapsed_ms)
             with self._cv:
                 self._in_flight.pop(syscall, None)
                 probe.emit("release", syscall=syscall, in_flight=len(self._in_flight))

@@ -16,8 +16,12 @@
 import json
 import shutil
 import tempfile
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+
+from aios.scheduler.policies import fifo, make_hrrn, make_shortest_first
 
 from .metrics import analyze
 from .runner import run_once
@@ -189,10 +193,50 @@ def check_metrics(root: Path) -> None:
     print("PASS 指标关系合理")
 
 
+class _FakePredictor:
+    """按对象返回固定预测值，用于选择规则的单元检查。"""
+
+    def __init__(self, values: Dict[int, float]) -> None:
+        self.values = values
+
+    def predict(self, syscall: Any) -> float:
+        return self.values[id(syscall)]
+
+
+def _fake_syscall(wait_seconds: float) -> Any:
+    query = SimpleNamespace(messages=[{"role": "user", "content": "x"}], max_new_tokens=128)
+    return SimpleNamespace(query=query, created_time=time.time() - wait_seconds)
+
+
+def check_policies() -> None:
+    short_new = _fake_syscall(wait_seconds=0.0)
+    long_waited = _fake_syscall(wait_seconds=10.0)
+    waiting = [long_waited, short_new]
+
+    predictor = _FakePredictor({id(long_waited): 1000.0, id(short_new): 100.0})
+
+    assert fifo(waiting, time.monotonic()) == 0, "FIFO 应取最早到达的请求"
+    assert make_shortest_first(predictor)(waiting, time.monotonic()) == 1, "短请求优先应取预计最短的请求"
+    # 长请求等待 10 秒、预计 1 秒，响应比约 11；短请求刚到，响应比约 1。
+    assert make_hrrn(predictor)(waiting, time.monotonic()) == 0, "响应比应偏向已等待的请求"
+
+    # 短请求等待 20 秒后，响应比约 201，应超过长请求。
+    later = time.time() + 20.0
+    original_time = time.time
+    try:
+        time.time = lambda: later  # type: ignore[assignment]
+        assert make_hrrn(predictor)(waiting, time.monotonic()) == 1, "等待足够久后应轮到短请求"
+    finally:
+        time.time = original_time  # type: ignore[assignment]
+
+    print("PASS 选择规则")
+
+
 def main() -> int:
     base = Path(tempfile.mkdtemp(prefix="aios-bench-selftest-"))
     try:
         check_scenario()
+        check_policies()
         check_single_request(base / "single")
         check_batch_blocking(base / "batch")
         check_multi_step(base / "multi")

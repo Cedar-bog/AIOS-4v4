@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aios.llm_core.adapter import LLMAdapter
-from aios.scheduler.fifo_scheduler import FIFOScheduler
+from aios.scheduler.bounded_scheduler import BoundedScheduler
 from aios.syscall.syscall import create_syscall_executor
 from aios.utils import probe
 
@@ -45,7 +45,7 @@ def _quiet_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def build_scheduler(batch_interval: float, llm: LLMAdapter) -> FIFOScheduler:
+def build_scheduler(batch_interval: float, llm: LLMAdapter, max_concurrency: int = 4) -> BoundedScheduler:
     from aios.hooks.stores._global import (
         global_llm_req_queue_get_message,
         global_memory_req_queue_get_message,
@@ -53,7 +53,7 @@ def build_scheduler(batch_interval: float, llm: LLMAdapter) -> FIFOScheduler:
         global_tool_req_queue_get_message,
     )
 
-    return FIFOScheduler(
+    return BoundedScheduler(
         llm=llm,
         memory_manager=_NullManager(),
         storage_manager=_NullManager(),
@@ -64,6 +64,7 @@ def build_scheduler(batch_interval: float, llm: LLMAdapter) -> FIFOScheduler:
         get_storage_syscall=global_storage_req_queue_get_message,
         get_tool_syscall=global_tool_req_queue_get_message,
         batch_interval=batch_interval,
+        max_concurrency=max_concurrency,
     )
 
 
@@ -72,6 +73,7 @@ def run_once(
     out_dir: Path,
     batch_interval: float,
     model_name: str = "mock-model",
+    max_concurrency: int = 4,
 ) -> Dict[str, Any]:
     """用给定场景跑一次，把事件写到 out_dir/events.jsonl。"""
     _quiet_logging()
@@ -82,14 +84,16 @@ def run_once(
     sink = JsonlSink(str(out_dir / "events.jsonl"))
     probe.set_sink(sink)
 
-    scheduler: Optional[FIFOScheduler] = None
+    scheduler: Optional[BoundedScheduler] = None
     started_wall = time.time()
     error: Optional[str] = None
     summary: Dict[str, Any] = {}
 
     try:
         llm = MockLLMAdapter(model_name=model_name)
-        scheduler = build_scheduler(batch_interval=batch_interval, llm=llm)
+        scheduler = build_scheduler(
+            batch_interval=batch_interval, llm=llm, max_concurrency=max_concurrency
+        )
         execute_request, _, _ = create_syscall_executor()
 
         scheduler.start()
@@ -110,6 +114,7 @@ def run_once(
         "events": str(out_dir / "events.jsonl"),
         "event_count": sink.count,
         "batch_interval": batch_interval,
+        "max_concurrency": max_concurrency,
         "model_name": model_name,
         "started_wall": started_wall,
         "summary": {
@@ -130,6 +135,7 @@ def run_experiment(
     batch_interval: Optional[float] = None,
     repeats: int = 1,
     model_name: str = "mock-model",
+    max_concurrency: Optional[int] = None,
     do_analyze: bool = True,
 ) -> Dict[str, Any]:
     """按配置跑整组实验，重复运行写到不同子目录。"""
@@ -142,6 +148,9 @@ def run_experiment(
     if batch_interval is None:
         batch_interval = float(config.get("batch_interval", 0.1))
 
+    if max_concurrency is None:
+        max_concurrency = int(config.get("max_concurrency", 4))
+
     scenario_path = out_root_path / "scenario.jsonl"
     rows = generate(config, str(scenario_path))
     # 后面的重复运行复用同一份场景，保证每个请求的服务时间一致。
@@ -151,6 +160,7 @@ def run_experiment(
         "config_path": config_path,
         "config": config,
         "batch_interval": batch_interval,
+        "max_concurrency": max_concurrency,
         "scenario": str(scenario_path),
         "requests": len(rows),
         "tasks": config.get("num_tasks"),
@@ -164,6 +174,7 @@ def run_experiment(
             out_dir=run_dir,
             batch_interval=batch_interval,
             model_name=model_name,
+            max_concurrency=max_concurrency,
         )
         overview["runs"].append(meta)
         print(
@@ -188,6 +199,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", required=True, help="场景配置 YAML 路径")
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--batch-interval", type=float, default=None, help="调度器批次间隔，秒")
+    parser.add_argument("--max-concurrency", type=int, default=None, help="并发上限，默认读配置")
     parser.add_argument("--repeats", type=int, default=1, help="重复次数")
     parser.add_argument("--model-name", default="mock-model", help="假后端模型名")
     parser.add_argument("--no-analyze", action="store_true", help="只跑实验，不做汇总")
@@ -199,6 +211,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         batch_interval=args.batch_interval,
         repeats=args.repeats,
         model_name=args.model_name,
+        max_concurrency=args.max_concurrency,
         do_analyze=not args.no_analyze,
     )
     return 0

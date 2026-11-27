@@ -38,7 +38,12 @@ def _run(root: Path, config: Dict[str, Any], batch_interval: float, rows: Option
         with open(root / "scenario.jsonl", "w", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    run_once(rows, root / "run_00", batch_interval=batch_interval)
+    run_once(
+        rows,
+        root / "run_00",
+        batch_interval=batch_interval,
+        max_concurrency=int(config.get("max_concurrency", 4)),
+    )
     return analyze(str(root))
 
 
@@ -96,6 +101,7 @@ def check_batch_blocking(root: Path) -> None:
         {
             "seed": 3,
             "num_tasks": 12,
+            "max_concurrency": 4,
             "arrival": {"pattern": "all_at_once"},
             "output": {"median_tokens": 80, "sigma": 1.0},
             "model": {"decode_ms_per_token": 10.0},
@@ -105,11 +111,12 @@ def check_batch_blocking(root: Path) -> None:
     overview = summary["combined"]["overview"]
     metrics = summary["combined"]["groups"]["all"]["metrics"]
 
-    assert overview["batches"]["max_size"] == 12, "同时到达的请求应落在同一批"
-    assert overview["peak_concurrency"] == 12, "原版应当没有并发上限"
-    assert metrics["notify_lag_ms"]["n"] == 12, "通知延迟应当可以测量"
+    assert overview["delivered"] == 12, "请求应全部送达"
+    assert overview["peak_concurrency"] <= 4, "峰值并发不应超过上限"
+    assert overview["peak_concurrency"] >= 2, "并发上限内应当有并行执行"
+    assert metrics["notify_lag_ms"]["p90"] < 50.0, "结果应在完成后立即写回"
 
-    print("PASS 批次和并发行为可测量")
+    print("PASS 并发上限和及时返回")
 
 
 def check_multi_step(root: Path) -> None:

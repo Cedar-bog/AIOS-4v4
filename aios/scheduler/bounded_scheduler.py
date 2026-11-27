@@ -80,6 +80,8 @@ class BoundedScheduler(FIFOScheduler):
                     index = self._select_index(now)
                     syscall = self._waiting.pop(index)
                     self._in_flight[syscall] = now
+                    # 与批次调度器共用 batch 事件，表示请求被调度器取走。
+                    probe.emit("batch", syscall=syscall)
                     probe.emit("admit", syscall=syscall, in_flight=len(self._in_flight))
                     starts.append(syscall)
 

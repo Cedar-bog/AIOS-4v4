@@ -1,0 +1,36 @@
+# 多步任务：200 个任务，每个 2 到 4 步，约 600 个请求。
+name: multi_step_500
+seed: 29
+num_tasks: 200
+batch_interval: 0.1
+max_concurrency: 16
+
+steps:
+  min: 2
+  max: 4
+  gap_ms: 200.0
+
+arrival:
+  pattern: poisson
+  rate_per_sec: 20.0
+
+prompt:
+  tokens_min: 100
+  tokens_max: 600
+
+output:
+  median_tokens: 60
+  sigma: 0.7
+
+max_tokens: 256
+
+model:
+  base_ms: 20.0
+  prefill_ms_per_token: 0.02
+  decode_ms_per_token: 5.0
+  jitter_sigma: 0.1
+
+faults:
+  error_rate: 0.0
+  timeout_rate: 0.0
+  slow_rate: 0.0

@@ -1,0 +1,39 @@
+# 响应比选择，稳定负载：并发上限 24，略低于饱和点。
+name: mixed_500_hrrn_c24
+seed: 42
+num_tasks: 500
+batch_interval: 0.1
+max_concurrency: 24
+selection_policy: hrrn
+cold_start_ms: 500
+predictor_window: 32
+
+steps:
+  min: 1
+  max: 1
+
+arrival:
+  pattern: poisson
+  rate_per_sec: 40.0
+
+prompt:
+  tokens_min: 50
+  tokens_max: 1500
+
+output:
+  median_tokens: 80
+  sigma: 1.0
+
+max_tokens: 512
+
+model:
+  base_ms: 20.0
+  prefill_ms_per_token: 0.02
+  decode_ms_per_token: 5.0
+  jitter_sigma: 0.15
+
+faults:
+  error_rate: 0.0
+  timeout_rate: 0.0
+  slow_rate: 0.01
+  slow_extra_ms: 3000.0

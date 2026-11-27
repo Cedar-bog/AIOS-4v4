@@ -27,6 +27,8 @@ METRIC_NAMES = [
     "service_ms",
     "notify_lag_ms",
     "slowdown",
+    "pred_error_ms",
+    "pred_abs_error_ms",
 ]
 
 
@@ -71,6 +73,8 @@ def _load_events(path: Path) -> Dict[str, Dict[str, Any]]:
                     "status_code": record.get("status_code"),
                     "error": record.get("error"),
                 }
+            elif name == "predict":
+                entry["predicted_ms"] = record.get("predicted_ms")
     return events
 
 
@@ -137,6 +141,14 @@ def _request_metrics(run: str, rows: List[Dict[str, Any]], events: Dict[str, Dic
         response = _diff(returned, arrive)
         slowdown = response / service if response is not None and service else None
 
+        predicted = (entry or {}).get("predicted_ms")
+        planned = row.get("service_ms")
+        pred_error = None
+        pred_abs_error = None
+        if predicted is not None and planned is not None:
+            pred_error = predicted - planned
+            pred_abs_error = abs(pred_error)
+
         records.append(
             {
                 "run": run,
@@ -155,6 +167,9 @@ def _request_metrics(run: str, rows: List[Dict[str, Any]], events: Dict[str, Dic
                 "notify_lag_ms": _diff(notify, backend_done),
                 "response_ms": response,
                 "slowdown": slowdown,
+                "predicted_ms": predicted,
+                "pred_error_ms": pred_error,
+                "pred_abs_error_ms": pred_abs_error,
                 "delivered": returned is not None,
                 "notify_count": len((entry or {}).get("ts", {}).get("notify", [])),
                 "status_code": result.get("status_code"),
@@ -279,6 +294,9 @@ def _write_requests(path: Path, records: List[Dict[str, Any]]) -> None:
         "notify_lag_ms",
         "response_ms",
         "slowdown",
+        "predicted_ms",
+        "pred_error_ms",
+        "pred_abs_error_ms",
         "delivered",
         "notify_count",
         "status_code",

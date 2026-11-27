@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 
 from aios.llm_core.adapter import LLMAdapter
 from aios.scheduler.bounded_scheduler import BoundedScheduler
+from aios.scheduler.duration import ConstantPredictor, DurationPredictor, OraclePredictor
+from aios.scheduler.policies import make_selection
 from aios.syscall.syscall import create_syscall_executor
 from aios.utils import probe
 
@@ -45,7 +47,14 @@ def _quiet_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def build_scheduler(batch_interval: float, llm: LLMAdapter, max_concurrency: int = 4) -> BoundedScheduler:
+def build_scheduler(
+    batch_interval: float,
+    llm: LLMAdapter,
+    max_concurrency: int = 4,
+    selection: Optional[Any] = None,
+    predictor: Optional[Any] = None,
+    request_timeout: Optional[float] = None,
+) -> BoundedScheduler:
     from aios.hooks.stores._global import (
         global_llm_req_queue_get_message,
         global_memory_req_queue_get_message,
@@ -65,6 +74,9 @@ def build_scheduler(batch_interval: float, llm: LLMAdapter, max_concurrency: int
         get_tool_syscall=global_tool_req_queue_get_message,
         batch_interval=batch_interval,
         max_concurrency=max_concurrency,
+        selection=selection,
+        predictor=predictor,
+        request_timeout=request_timeout,
     )
 
 
@@ -74,6 +86,11 @@ def run_once(
     batch_interval: float,
     model_name: str = "mock-model",
     max_concurrency: int = 4,
+    selection_policy: str = "fifo",
+    predictor_mode: str = "sliding",
+    cold_start_ms: float = 500.0,
+    predictor_window: int = 32,
+    request_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """用给定场景跑一次，把事件写到 out_dir/events.jsonl。"""
     _quiet_logging()
@@ -91,8 +108,26 @@ def run_once(
 
     try:
         llm = MockLLMAdapter(model_name=model_name)
+        if predictor_mode == "constant":
+            predictor = ConstantPredictor(cold_start_ms)
+        elif predictor_mode == "oracle":
+            predictor = OraclePredictor(cold_start_ms)
+        elif predictor_mode == "sliding":
+            predictor = DurationPredictor(
+                model_name=llm.llm_configs[0].name,
+                window=predictor_window,
+                cold_start_ms=cold_start_ms,
+            )
+        else:
+            raise ValueError(f"未知的估计器模式: {predictor_mode}")
+        selection = make_selection(selection_policy, predictor)
         scheduler = build_scheduler(
-            batch_interval=batch_interval, llm=llm, max_concurrency=max_concurrency
+            batch_interval=batch_interval,
+            llm=llm,
+            max_concurrency=max_concurrency,
+            selection=selection,
+            predictor=predictor,
+            request_timeout=request_timeout,
         )
         execute_request, _, _ = create_syscall_executor()
 
@@ -115,6 +150,11 @@ def run_once(
         "event_count": sink.count,
         "batch_interval": batch_interval,
         "max_concurrency": max_concurrency,
+        "selection_policy": selection_policy,
+        "predictor_mode": predictor_mode,
+        "cold_start_ms": cold_start_ms,
+        "predictor_window": predictor_window,
+        "request_timeout": request_timeout,
         "model_name": model_name,
         "started_wall": started_wall,
         "summary": {
@@ -136,6 +176,11 @@ def run_experiment(
     repeats: int = 1,
     model_name: str = "mock-model",
     max_concurrency: Optional[int] = None,
+    selection_policy: Optional[str] = None,
+    predictor_mode: Optional[str] = None,
+    cold_start_ms: Optional[float] = None,
+    predictor_window: Optional[int] = None,
+    request_timeout: Optional[float] = None,
     do_analyze: bool = True,
 ) -> Dict[str, Any]:
     """按配置跑整组实验，重复运行写到不同子目录。"""
@@ -151,6 +196,22 @@ def run_experiment(
     if max_concurrency is None:
         max_concurrency = int(config.get("max_concurrency", 4))
 
+    if selection_policy is None:
+        selection_policy = str(config.get("selection_policy", "fifo"))
+
+    if predictor_mode is None:
+        predictor_mode = str(config.get("predictor_mode", "sliding"))
+
+    if cold_start_ms is None:
+        cold_start_ms = float(config.get("cold_start_ms", 500.0))
+
+    if predictor_window is None:
+        predictor_window = int(config.get("predictor_window", 32))
+
+    if request_timeout is None:
+        configured_timeout = config.get("request_timeout")
+        request_timeout = float(configured_timeout) if configured_timeout else None
+
     scenario_path = out_root_path / "scenario.jsonl"
     rows = generate(config, str(scenario_path))
     # 后面的重复运行复用同一份场景，保证每个请求的服务时间一致。
@@ -161,6 +222,11 @@ def run_experiment(
         "config": config,
         "batch_interval": batch_interval,
         "max_concurrency": max_concurrency,
+        "selection_policy": selection_policy,
+        "predictor_mode": predictor_mode,
+        "cold_start_ms": cold_start_ms,
+        "predictor_window": predictor_window,
+        "request_timeout": request_timeout,
         "scenario": str(scenario_path),
         "requests": len(rows),
         "tasks": config.get("num_tasks"),
@@ -175,6 +241,11 @@ def run_experiment(
             batch_interval=batch_interval,
             model_name=model_name,
             max_concurrency=max_concurrency,
+            selection_policy=selection_policy,
+            predictor_mode=predictor_mode,
+            cold_start_ms=cold_start_ms,
+            predictor_window=predictor_window,
+            request_timeout=request_timeout,
         )
         overview["runs"].append(meta)
         print(
@@ -200,6 +271,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--out", required=True, help="输出目录")
     parser.add_argument("--batch-interval", type=float, default=None, help="调度器批次间隔，秒")
     parser.add_argument("--max-concurrency", type=int, default=None, help="并发上限，默认读配置")
+    parser.add_argument("--selection-policy", default=None, help="选择策略：fifo、shortest、hrrn")
+    parser.add_argument("--predictor-mode", default=None, help="估计器：sliding、constant、oracle")
+    parser.add_argument("--cold-start-ms", type=float, default=None, help="耗时估计冷启动值，毫秒")
+    parser.add_argument("--predictor-window", type=int, default=None, help="滑动均值窗口")
+    parser.add_argument("--request-timeout", type=float, default=None, help="请求超时，秒")
     parser.add_argument("--repeats", type=int, default=1, help="重复次数")
     parser.add_argument("--model-name", default="mock-model", help="假后端模型名")
     parser.add_argument("--no-analyze", action="store_true", help="只跑实验，不做汇总")
@@ -212,6 +288,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         repeats=args.repeats,
         model_name=args.model_name,
         max_concurrency=args.max_concurrency,
+        selection_policy=args.selection_policy,
+        predictor_mode=args.predictor_mode,
+        cold_start_ms=args.cold_start_ms,
+        predictor_window=args.predictor_window,
+        request_timeout=args.request_timeout,
         do_analyze=not args.no_analyze,
     )
     return 0

@@ -52,6 +52,12 @@ class BoundedScheduler(FIFOScheduler):
         self._cv = threading.Condition()
         self._collector: Optional[threading.Thread] = None
         self._dispatcher: Optional[threading.Thread] = None
+        self._collector_done = False
+
+    def _enqueue_waiting(self, syscall: Any) -> None:
+        with self._cv:
+            self._waiting.append(syscall)
+            self._cv.notify_all()
 
     def _collect_requests(self) -> None:
         """把全局队列里的请求搬进等待列表。"""
@@ -60,9 +66,19 @@ class BoundedScheduler(FIFOScheduler):
                 syscall = self.get_llm_syscall()
             except Empty:
                 continue
-            with self._cv:
-                self._waiting.append(syscall)
-                self._cv.notify_all()
+            self._enqueue_waiting(syscall)
+
+        # 关闭时把已经进入队列的请求收完，避免调用方永久等待。
+        while True:
+            try:
+                syscall = self.get_llm_syscall()
+            except Empty:
+                break
+            self._enqueue_waiting(syscall)
+
+        with self._cv:
+            self._collector_done = True
+            self._cv.notify_all()
 
     def _select_index(self, now: float) -> int:
         if self.selection is None:
@@ -74,7 +90,7 @@ class BoundedScheduler(FIFOScheduler):
         while True:
             starts: List[Any] = []
             with self._cv:
-                if not self.active and not self._waiting and not self._in_flight:
+                if not self.active and self._collector_done and not self._waiting and not self._in_flight:
                     return
 
                 now = time.monotonic()
@@ -177,6 +193,8 @@ class BoundedScheduler(FIFOScheduler):
 
         if self._collector is not None:
             self._collector.join()
+        with self._cv:
+            self._cv.notify_all()
         if self._dispatcher is not None:
             self._dispatcher.join()
 

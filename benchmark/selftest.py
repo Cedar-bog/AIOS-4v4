@@ -16,6 +16,7 @@
 import json
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,9 @@ def _run(root: Path, config: Dict[str, Any], batch_interval: float, rows: Option
         root / "run_00",
         batch_interval=batch_interval,
         max_concurrency=int(config.get("max_concurrency", 4)),
+        request_timeout=(
+            float(config["request_timeout"]) if config.get("request_timeout") else None
+        ),
     )
     return analyze(str(root))
 
@@ -232,6 +236,106 @@ def check_policies() -> None:
     print("PASS 选择规则")
 
 
+def check_timeout(root: Path) -> None:
+    config = _config(
+        {
+            "seed": 4,
+            "num_tasks": 1,
+            "max_concurrency": 1,
+            "arrival": {"pattern": "all_at_once"},
+            "request_timeout": 0.2,
+        }
+    )
+    rows = generate(config, str(root / "scenario.jsonl"))
+    rows[0]["service_ms"] = 1000.0
+    summary = _run(root, config, batch_interval=0.1, rows=rows)
+
+    import csv
+
+    with open(root / "requests.csv", "r", encoding="utf-8") as fh:
+        record = next(csv.DictReader(fh))
+
+    response = float(record["response_ms"])
+    assert record["delivered"] == "True", "超时请求也应通知调用方"
+    assert record["status_code"] == "408", "超时应返回 408"
+    assert 150.0 <= response <= 700.0, f"超时通知时间异常: {response}"
+    assert float(record["notify_lag_ms"]) < 0, "超时通知应早于后端返回"
+    assert float(record["service_ms"]) >= 900.0, "后端调用应继续跑到实际结束"
+
+    print("PASS 超时通知和名额占用")
+
+
+def check_cap_with_faults(root: Path) -> None:
+    config = _config(
+        {
+            "seed": 7,
+            "num_tasks": 12,
+            "max_concurrency": 4,
+            "arrival": {"pattern": "all_at_once"},
+        }
+    )
+    rows = generate(config, str(root / "scenario.jsonl"))
+    pattern = ["ok"] * 4 + ["error"] * 4 + ["timeout"] * 4
+    for row, fault in zip(rows, pattern):
+        row["fault"] = fault
+
+    import logging
+
+    logging.disable(logging.CRITICAL)
+    try:
+        summary = _run(root, config, batch_interval=0.1, rows=rows)
+    finally:
+        logging.disable(logging.NOTSET)
+
+    overview = summary["combined"]["overview"]
+    assert overview["delivered"] == 12, "故障请求也应送达"
+    assert overview["peak_concurrency"] <= 4, "故障期间并发不应超过上限"
+    assert overview["notify_missing"] == 0
+    assert overview["notify_duplicate"] == 0
+
+    print("PASS 故障下的并发上限")
+
+
+def check_shutdown() -> None:
+    from aios.syscall.syscall import create_syscall_executor
+
+    from .mock_backend import MockLLMAdapter
+    from .query import BenchLLMQuery
+    from .runner import build_scheduler
+
+    llm = MockLLMAdapter()
+    scheduler = build_scheduler(batch_interval=0.05, llm=llm, max_concurrency=1)
+    execute_request, _, _ = create_syscall_executor()
+
+    scheduler.start()
+    outcome: Dict[str, Any] = {}
+
+    def call() -> None:
+        query = BenchLLMQuery(
+            messages=[{"role": "user", "content": "x"}],
+            bench_request_id="shutdown-1",
+            bench_service_ms=300.0,
+            bench_fault="ok",
+        )
+        outcome["payload"] = execute_request("agent", query)
+
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + 2.0
+    while not scheduler._in_flight and not scheduler._waiting and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    scheduler.stop()
+    thread.join(timeout=3.0)
+
+    assert not thread.is_alive(), "关闭后调用方应被唤醒"
+    payload = outcome.get("payload")
+    assert payload is not None and payload.get("response") is not None, "在途请求应完成"
+
+    print("PASS 关闭时处理在途请求")
+
+
 def main() -> int:
     base = Path(tempfile.mkdtemp(prefix="aios-bench-selftest-"))
     try:
@@ -241,7 +345,10 @@ def main() -> int:
         check_batch_blocking(base / "batch")
         check_multi_step(base / "multi")
         check_faults(base / "faults")
+        check_cap_with_faults(base / "cap_faults")
+        check_timeout(base / "timeout")
         check_metrics(base / "metrics")
+        check_shutdown()
     finally:
         shutil.rmtree(base, ignore_errors=True)
     print("全部通过")

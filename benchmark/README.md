@@ -63,6 +63,13 @@ git worktree add ../aios-optimized exp/notify
 
 每一轮的运行顺序交替，第 1 轮先基线后优化，第 2 轮反过来，用来抵消机器状态随时间的漂移。所有轮次使用同一份场景，场景哈希不一致会直接报错。
 
+`aios/config/config.yaml` 被 `.gitignore` 忽略，新建的 worktree 里没有这个文件，第一次运行前需要从主仓库复制一份：
+
+```bash
+cp AIOS-4v4/aios/config/config.yaml aios-baseline/aios/config/config.yaml
+cp AIOS-4v4/aios/config/config.yaml aios-optimized/aios/config/config.yaml
+```
+
 噪声基准是把同一个目录传给两边，跑两次独立采集：
 
 ```bash

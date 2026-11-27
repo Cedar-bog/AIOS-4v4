@@ -25,6 +25,7 @@ DEFAULTS: Dict[str, Any] = {
     "name": "scenario",
     "seed": 0,
     "num_tasks": 20,
+    "max_concurrency": 4,
     "steps": {"min": 1, "max": 1, "gap_ms": 200.0},
     "arrival": {"pattern": "uniform", "rate_per_sec": 20.0, "jitter": 0.5},
     "burst": {"size": 10, "gap_ms": 300.0},

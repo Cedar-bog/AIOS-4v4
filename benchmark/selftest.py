@@ -38,7 +38,12 @@ def _run(root: Path, config: Dict[str, Any], batch_interval: float, rows: Option
         with open(root / "scenario.jsonl", "w", encoding="utf-8") as fh:
             for row in rows:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    run_once(rows, root / "run_00", batch_interval=batch_interval)
+    run_once(
+        rows,
+        root / "run_00",
+        batch_interval=batch_interval,
+        max_concurrency=int(config.get("max_concurrency", 4)),
+    )
     return analyze(str(root))
 
 
@@ -96,6 +101,7 @@ def check_batch_blocking(root: Path) -> None:
         {
             "seed": 3,
             "num_tasks": 12,
+            "max_concurrency": 12,
             "arrival": {"pattern": "all_at_once"},
             "output": {"median_tokens": 80, "sigma": 1.0},
             "model": {"decode_ms_per_token": 10.0},

@@ -69,6 +69,7 @@ class FIFOScheduler(BaseScheduler):
         get_storage_syscall: StorageRequestQueueGetMessage,
         get_tool_syscall: ToolRequestQueueGetMessage,
         batch_interval: float = 1.0,
+        max_batch_size: Optional[int] = None,
     ):
         """
         Initialize the FIFO Scheduler.
@@ -97,6 +98,7 @@ class FIFOScheduler(BaseScheduler):
             get_tool_syscall,
         )
         self.batch_interval = batch_interval
+        self.max_batch_size = max_batch_size
         
     def _execute_syscall(
         self, 
@@ -226,6 +228,8 @@ class FIFOScheduler(BaseScheduler):
 
             batch = []
             while True:
+                if self.max_batch_size is not None and len(batch) >= self.max_batch_size:
+                    break
                 try:
                     llm_syscall = self.get_llm_syscall()
                     probe.emit(

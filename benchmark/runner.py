@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from aios.llm_core.adapter import LLMAdapter
 from aios.scheduler.bounded_scheduler import BoundedScheduler
-from aios.scheduler.duration import DurationPredictor
+from aios.scheduler.duration import ConstantPredictor, DurationPredictor, OraclePredictor
 from aios.scheduler.policies import make_selection
 from aios.syscall.syscall import create_syscall_executor
 from aios.utils import probe
@@ -85,6 +85,7 @@ def run_once(
     model_name: str = "mock-model",
     max_concurrency: int = 4,
     selection_policy: str = "fifo",
+    predictor_mode: str = "sliding",
     cold_start_ms: float = 500.0,
     predictor_window: int = 32,
 ) -> Dict[str, Any]:
@@ -104,11 +105,18 @@ def run_once(
 
     try:
         llm = MockLLMAdapter(model_name=model_name)
-        predictor = DurationPredictor(
-            model_name=llm.llm_configs[0].name,
-            window=predictor_window,
-            cold_start_ms=cold_start_ms,
-        )
+        if predictor_mode == "constant":
+            predictor = ConstantPredictor(cold_start_ms)
+        elif predictor_mode == "oracle":
+            predictor = OraclePredictor(cold_start_ms)
+        elif predictor_mode == "sliding":
+            predictor = DurationPredictor(
+                model_name=llm.llm_configs[0].name,
+                window=predictor_window,
+                cold_start_ms=cold_start_ms,
+            )
+        else:
+            raise ValueError(f"未知的估计器模式: {predictor_mode}")
         selection = make_selection(selection_policy, predictor)
         scheduler = build_scheduler(
             batch_interval=batch_interval,
@@ -139,6 +147,7 @@ def run_once(
         "batch_interval": batch_interval,
         "max_concurrency": max_concurrency,
         "selection_policy": selection_policy,
+        "predictor_mode": predictor_mode,
         "cold_start_ms": cold_start_ms,
         "predictor_window": predictor_window,
         "model_name": model_name,
@@ -163,6 +172,7 @@ def run_experiment(
     model_name: str = "mock-model",
     max_concurrency: Optional[int] = None,
     selection_policy: Optional[str] = None,
+    predictor_mode: Optional[str] = None,
     cold_start_ms: Optional[float] = None,
     predictor_window: Optional[int] = None,
     do_analyze: bool = True,
@@ -183,6 +193,9 @@ def run_experiment(
     if selection_policy is None:
         selection_policy = str(config.get("selection_policy", "fifo"))
 
+    if predictor_mode is None:
+        predictor_mode = str(config.get("predictor_mode", "sliding"))
+
     if cold_start_ms is None:
         cold_start_ms = float(config.get("cold_start_ms", 500.0))
 
@@ -200,6 +213,7 @@ def run_experiment(
         "batch_interval": batch_interval,
         "max_concurrency": max_concurrency,
         "selection_policy": selection_policy,
+        "predictor_mode": predictor_mode,
         "cold_start_ms": cold_start_ms,
         "predictor_window": predictor_window,
         "scenario": str(scenario_path),
@@ -217,6 +231,7 @@ def run_experiment(
             model_name=model_name,
             max_concurrency=max_concurrency,
             selection_policy=selection_policy,
+            predictor_mode=predictor_mode,
             cold_start_ms=cold_start_ms,
             predictor_window=predictor_window,
         )
@@ -245,6 +260,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--batch-interval", type=float, default=None, help="调度器批次间隔，秒")
     parser.add_argument("--max-concurrency", type=int, default=None, help="并发上限，默认读配置")
     parser.add_argument("--selection-policy", default=None, help="选择策略：fifo、shortest、hrrn")
+    parser.add_argument("--predictor-mode", default=None, help="估计器：sliding、constant、oracle")
     parser.add_argument("--cold-start-ms", type=float, default=None, help="耗时估计冷启动值，毫秒")
     parser.add_argument("--predictor-window", type=int, default=None, help="滑动均值窗口")
     parser.add_argument("--repeats", type=int, default=1, help="重复次数")
@@ -260,6 +276,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         model_name=args.model_name,
         max_concurrency=args.max_concurrency,
         selection_policy=args.selection_policy,
+        predictor_mode=args.predictor_mode,
         cold_start_ms=args.cold_start_ms,
         predictor_window=args.predictor_window,
         do_analyze=not args.no_analyze,

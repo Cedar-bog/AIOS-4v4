@@ -69,3 +69,36 @@ class DurationPredictor:
     def sample_count(self) -> int:
         with self._lock:
             return len(self._global)
+
+
+class ConstantPredictor:
+    """不使用任何分组信息的基线估计器。"""
+
+    def __init__(self, value_ms: float = 500.0) -> None:
+        self.value_ms = max(1.0, float(value_ms))
+
+    def predict(self, syscall: Any) -> float:
+        return self.value_ms
+
+    def observe(self, syscall: Any, service_ms: float) -> None:
+        return None
+
+
+class OraclePredictor:
+    """直接读取场景预置耗时，只用于估计准确度上界分析。
+
+    真实请求没有 bench_service_ms 字段，此时退回到固定值。
+    """
+
+    def __init__(self, fallback_ms: float = 500.0) -> None:
+        self.fallback_ms = max(1.0, float(fallback_ms))
+
+    def predict(self, syscall: Any) -> float:
+        query = getattr(syscall, "query", None)
+        value = getattr(query, "bench_service_ms", None)
+        if value is None:
+            return self.fallback_ms
+        return max(1.0, float(value))
+
+    def observe(self, syscall: Any, service_ms: float) -> None:
+        return None

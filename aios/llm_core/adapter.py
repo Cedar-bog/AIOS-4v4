@@ -444,8 +444,13 @@ class LLMAdapter:
     def _notify_syscall(self, syscall: Any, response: LLMResponse, status: Optional[str] = None) -> None:
         """写回结果并唤醒调用方。
 
-        所有结果写回路径都走这里，避免时间戳和通知逻辑分散在多处。
+        所有结果写回路径都走这里，每个请求只通知一次。重复调用会被忽略，
+        避免结果在单请求回写和批次兜底之间被重复发布。
         """
+        if getattr(syscall, "_result_notified", False):
+            return
+        syscall._result_notified = True
+
         if status is not None:
             syscall.set_status(status)
         syscall.set_response(response)
@@ -575,9 +580,6 @@ class LLMAdapter:
         max_group_workers = len(grouped_tasks)
         logger.info(f"Processing {len(grouped_tasks)} model groups...")
 
-        # Dictionary to store results keyed by original index
-        results_dict = {}
-
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_group_workers, thread_name_prefix="LLMGroupWorker") as group_executor:
                 future_to_group = {
@@ -594,15 +596,6 @@ class LLMAdapter:
                         # Worker returns a list of (original_index, result_tuple)
                         # where result_tuple is (syscall_object, LLMResponse)
                         group_results = future.result() # Raises exceptions from the worker function
-                        
-                        for original_idx, (syscall_obj, response) in group_results:
-                            results_dict[original_idx] = response # Store the LLMResponse
-                            # Update syscall object status based on response
-                            self._notify_syscall(
-                                syscall_obj,
-                                response,
-                                "done" if response.finished else "suspend",
-                            )
 
                         logger.info(f"Group processing completed for model '{model_name_completed}' (Index {model_idx_completed}). Processed {len(group_results)} tasks.")
 
@@ -618,9 +611,8 @@ class LLMAdapter:
                         )
                         tasks_in_failed_group = grouped_tasks[model_idx_completed]
                         for failed_original_idx, failed_syscall in tasks_in_failed_group:
-                            if failed_original_idx not in results_dict: # Avoid overwriting if processed before crash
-                                results_dict[failed_original_idx] = error_response
-                                self._notify_syscall(failed_syscall, error_response, "error")
+                            # 已写回的请求会被 _notify_syscall 忽略，这里可以全部兜底。
+                            self._notify_syscall(failed_syscall, error_response, "error")
 
 
         except Exception as outer_exc:
@@ -675,12 +667,20 @@ class LLMAdapter:
                     try:
                         # execute_llm_syscall now returns (syscall_obj, LLMResponse)
                         result_tuple = future.result()
+                        syscall_obj, response = result_tuple
+                        # 单请求完成即写回，不等同组其他请求。
+                        self._notify_syscall(
+                            syscall_obj,
+                            response,
+                            "done" if response.finished else "suspend",
+                        )
                         batch_results.append((original_idx, result_tuple))
                     except Exception as exc:
                         # Handle errors from individual execute_llm_syscall calls
                         logger.error(f"Error executing syscall for original index {original_idx} on model '{model_config.name}': {exc}", exc_info=False) # Log less detail maybe
                         # Create an error response for this specific task
                         error_response = self._handle_completion_error(exc, model_config.name)
+                        self._notify_syscall(syscall_obj, error_response, "done")
                         batch_results.append((original_idx, (syscall_obj, error_response))) # Return error response associated with the syscall
 
         except Exception as batch_exc:

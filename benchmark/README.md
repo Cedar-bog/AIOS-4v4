@@ -13,6 +13,8 @@ benchmark/
   workload.py       按场景发请求，支持多步任务
   runner.py         实验入口
   metrics.py        指标汇总
+  compare.py        按请求配对比较两轮实验
+  ab.py             交替运行两个 worktree
   selftest.py       环境自检
   configs/          场景配置
 ```
@@ -42,6 +44,52 @@ python -m benchmark.runner --config benchmark/configs/mixed.yaml --out results/m
 ```bash
 python -m benchmark.runner --config benchmark/configs/mixed.yaml --out results/mixed_b01 --batch-interval 0.1
 ```
+
+## 多轮对照
+
+两个分支的代码放在不同 worktree，用 `benchmark.ab` 交替运行。必须串行，两个进程同时跑会互相抢 CPU。
+
+```bash
+git worktree add ../aios-baseline exp/baseline
+git worktree add ../aios-optimized exp/notify
+
+.venv/bin/python -m benchmark.ab \
+  --baseline-dir ../aios-baseline \
+  --opt-dir ../aios-optimized \
+  --config benchmark/configs/mixed.yaml \
+  --rounds 3 \
+  --out results/ab-mixed
+```
+
+每一轮的运行顺序交替，第 1 轮先基线后优化，第 2 轮反过来，用来抵消机器状态随时间的漂移。所有轮次使用同一份场景，场景哈希不一致会直接报错。
+
+`aios/config/config.yaml` 被 `.gitignore` 忽略，新建的 worktree 里没有这个文件，第一次运行前需要从主仓库复制一份：
+
+```bash
+cp AIOS-4v4/aios/config/config.yaml aios-baseline/aios/config/config.yaml
+cp AIOS-4v4/aios/config/config.yaml aios-optimized/aios/config/config.yaml
+```
+
+噪声基准是把同一个目录传给两边，跑两次独立采集：
+
+```bash
+.venv/bin/python -m benchmark.ab \
+  --baseline-dir ../aios-baseline \
+  --opt-dir ../aios-baseline \
+  --config benchmark/configs/mixed.yaml \
+  --rounds 3 \
+  --out results/ab-noise
+```
+
+## 配对比较
+
+同一个场景在每个分支上生成的请求序列和服务时间相同，因此按 `(run, request_id)` 配对，比较每个请求的差值。
+
+```bash
+.venv/bin/python -m benchmark.compare --base results/ab-mixed/baseline --opt results/ab-mixed/optimized
+```
+
+输出按分组给出基线中位数、优化中位数、差值中位数和差值 P90。分组包括整体、长短请求、首步和后续步骤。差值要明显大于噪声基准才算有效。
 
 ## 输出
 

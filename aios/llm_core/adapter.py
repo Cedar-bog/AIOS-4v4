@@ -24,6 +24,16 @@ import requests
 from .utils import check_availability_for_selected_llm_lists
 from aios.utils import probe
 
+# 不同 litellm 版本里这个异常的名字不一致，取出存在的那些，避免属性缺失时抛错。
+_LITELLM_NOT_FOUND = tuple(
+    cls
+    for cls in (
+        getattr(getattr(litellm, "exceptions", None), "NotFound", None),
+        getattr(getattr(litellm, "exceptions", None), "NotFoundError", None),
+    )
+    if isinstance(cls, type)
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -418,7 +428,7 @@ class LLMAdapter:
         elif isinstance(error, APIError): # General API error from provider
             status_code = 502 # Bad Gateway (if error seems provider-side)
             user_message = f"API Error from model '{model_name}'. The provider reported an issue."
-        elif isinstance(error, litellm.exceptions.NotFound):
+        elif _LITELLM_NOT_FOUND and isinstance(error, _LITELLM_NOT_FOUND):
             status_code = 404 # Not Found
             user_message = f"Model Not Found: The specified model '{model_name}' could not be found or accessed."
         # --- Add more specific exception checks as needed ---

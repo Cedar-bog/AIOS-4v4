@@ -22,6 +22,7 @@ import traceback
 import litellm
 import requests
 from .utils import check_availability_for_selected_llm_lists
+from aios.utils import probe
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -430,6 +431,18 @@ class LLMAdapter:
             status_code=status_code
         )
         
+    def _notify_syscall(self, syscall: Any, response: LLMResponse, status: Optional[str] = None) -> None:
+        """写回结果并唤醒调用方。
+
+        所有结果写回路径都走这里，避免时间戳和通知逻辑分散在多处。
+        """
+        if status is not None:
+            syscall.set_status(status)
+        syscall.set_response(response)
+        syscall.set_end_time(time.time())
+        probe.emit("notify", syscall=syscall)
+        syscall.event.set()
+
     def execute_llm_syscalls(
         self,
         llm_syscalls: List[LLMQuery],
@@ -448,6 +461,8 @@ class LLMAdapter:
         if num_syscalls == 0:
             return []
 
+        probe.emit("adapter_batch", batch_size=num_syscalls)
+
         start_exec_time = time.time()
         logger.info(f"Starting batch execution for {num_syscalls} LLM syscalls...")
         
@@ -460,10 +475,7 @@ class LLMAdapter:
                 status_code=503 # Service Unavailable
             )
             for llm_syscall in llm_syscalls:
-                llm_syscall.set_status("done")
-                llm_syscall.set_response(error_response)
-                llm_syscall.set_end_time(time.time())
-                llm_syscall.event.set()
+                self._notify_syscall(llm_syscall, error_response, "done")
             
             return             
         
@@ -509,10 +521,11 @@ class LLMAdapter:
                 # Reject: no Ollama models to try, or re-check failed
                 logger.error(f"Selected LLMs are not available for syscall at index {i}")
                 llm_syscall = llm_syscalls[i]
-                llm_syscall.set_status("done")
-                llm_syscall.set_response(LLMResponse(response_message=None, error="Selected LLMs are not all available. Please check the available LLMs.", finished=True, status_code=500))
-                llm_syscall.set_end_time(time.time())
-                llm_syscall.event.set()
+                self._notify_syscall(
+                    llm_syscall,
+                    LLMResponse(response_message=None, error="Selected LLMs are not all available. Please check the available LLMs.", finished=True, status_code=500),
+                    "done",
+                )
             else:
                 executable_llm_syscalls.append(llm_syscalls[i])
                 available_selected_llm_lists.append(selected_llm_lists[i])
@@ -529,6 +542,15 @@ class LLMAdapter:
             if model_idx not in grouped_tasks:
                 grouped_tasks[model_idx] = []
             grouped_tasks[model_idx].append(llm_syscall)
+
+        for model_idx, tasks in grouped_tasks.items():
+            for llm_syscall in tasks:
+                probe.emit(
+                    "grouped",
+                    syscall=llm_syscall,
+                    model_idx=model_idx,
+                    group_size=len(tasks),
+                )
             
         # --- 3. Parallel Execution using ThreadPoolExecutor ---
         if not grouped_tasks:
@@ -536,10 +558,7 @@ class LLMAdapter:
             # Fill remaining Nones with a generic routing error if needed
             error_response = LLMResponse(response_message=None, error="System Error: LLM routing failed.", finished=True, status_code=500)
             for llm_syscall in executable_llm_syscalls:
-                llm_syscall.set_status("done")
-                llm_syscall.set_response(error_response)
-                llm_syscall.set_end_time(time.time())
-                llm_syscall.event.set()
+                self._notify_syscall(llm_syscall, error_response, "done")
             return
 
         # Determine max workers for the outer executor (managing groups)
@@ -569,14 +588,11 @@ class LLMAdapter:
                         for original_idx, (syscall_obj, response) in group_results:
                             results_dict[original_idx] = response # Store the LLMResponse
                             # Update syscall object status based on response
-                            if response.finished:
-                                syscall_obj.set_status("done")
-                            else:
-                                # This case implies interruption or streaming, adapt if needed
-                                syscall_obj.set_status("suspend") # Or another status?
-                            syscall_obj.set_response(response)
-                            syscall_obj.set_end_time(time.time())
-                            syscall_obj.event.set() # Notify anyone waiting on this specific syscall
+                            self._notify_syscall(
+                                syscall_obj,
+                                response,
+                                "done" if response.finished else "suspend",
+                            )
 
                         logger.info(f"Group processing completed for model '{model_name_completed}' (Index {model_idx_completed}). Processed {len(group_results)} tasks.")
 
@@ -594,10 +610,7 @@ class LLMAdapter:
                         for failed_original_idx, failed_syscall in tasks_in_failed_group:
                             if failed_original_idx not in results_dict: # Avoid overwriting if processed before crash
                                 results_dict[failed_original_idx] = error_response
-                                failed_syscall.set_status("error")
-                                failed_syscall.set_response(error_response)
-                                failed_syscall.set_end_time(time.time())
-                                failed_syscall.event.set()
+                                self._notify_syscall(failed_syscall, error_response, "error")
 
 
         except Exception as outer_exc:
@@ -611,10 +624,7 @@ class LLMAdapter:
             )
             # Assign error to all tasks that haven't received a result yet
             for llm_syscall in executable_llm_syscalls:
-                llm_syscall.set_status("error")
-                llm_syscall.set_response(error_response)
-                llm_syscall.set_end_time(time.time())
-                llm_syscall.event.set()
+                self._notify_syscall(llm_syscall, error_response, "error")
 
         end_exec_time = time.time()
         logger.info(f"Batch execution finished for {num_syscalls} syscalls in {end_exec_time - start_exec_time:.2f} seconds.")
@@ -693,6 +703,8 @@ class LLMAdapter:
         model_name = model_config.name
         model_identifier = self.llms[model_idx] # This is the actual model object or string ID
         api_base = model_config.hostname # Use hostname from the validated config
+
+        probe.emit("exec_start", syscall=llm_syscall)
 
         try:
             # --- Parameter Extraction and Validation ---

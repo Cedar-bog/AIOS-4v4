@@ -1,0 +1,35 @@
+# 冒烟配置：20 个单步请求，匀速到达，用来验证测量环境是否正常。
+name: smoke
+seed: 7
+num_tasks: 20
+batch_interval: 0.1
+
+steps:
+  min: 1
+  max: 1
+
+arrival:
+  pattern: uniform
+  rate_per_sec: 20.0
+  jitter: 0.5
+
+prompt:
+  tokens_min: 50
+  tokens_max: 400
+
+output:
+  median_tokens: 50
+  sigma: 0.6
+
+max_tokens: 256
+
+model:
+  base_ms: 20.0
+  prefill_ms_per_token: 0.02
+  decode_ms_per_token: 5.0
+  jitter_sigma: 0.1
+
+faults:
+  error_rate: 0.0
+  timeout_rate: 0.0
+  slow_rate: 0.0

@@ -376,8 +376,27 @@ def analyze(run_root: str) -> Dict[str, Any]:
 
     combined_overview = _overview(all_records, all_entries, all_batches)
     if runs:
+        # 不同进程的单调时钟基准不同，合并时间戳相减没有意义。
+        # 总完成时间和吞吐改为对各次运行取平均，峰值并发取最大值。
+        run_overviews = [run["overview"] for run in runs.values()]
         combined_overview["peak_concurrency"] = max(
-            run["overview"]["peak_concurrency"] for run in runs.values()
+            overview["peak_concurrency"] for overview in run_overviews
+        )
+        totals = [
+            overview["total_completion_ms"]
+            for overview in run_overviews
+            if overview["total_completion_ms"] is not None
+        ]
+        throughputs = [
+            overview["throughput_rps"]
+            for overview in run_overviews
+            if overview["throughput_rps"] is not None
+        ]
+        combined_overview["total_completion_ms"] = (
+            round(sum(totals) / len(totals), 3) if totals else None
+        )
+        combined_overview["throughput_rps"] = (
+            round(sum(throughputs) / len(throughputs), 3) if throughputs else None
         )
 
     summary = {

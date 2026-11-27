@@ -24,6 +24,8 @@ class BaseLogger:
         self.level_color = dict()
 
     def log(self, content, level):
+        if self.log_mode == "silent":
+            return
         if self.log_mode == "console":
             self.log_to_console(content, level)
         else:

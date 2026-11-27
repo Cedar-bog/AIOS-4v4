@@ -16,6 +16,7 @@ from aios.memory.manager import MemoryManager
 from aios.storage.storage import StorageManager
 from aios.llm_core.adapter import LLMAdapter
 from aios.tool.manager import ToolManager
+from aios.utils import probe
 
 from .base import BaseScheduler
 
@@ -220,10 +221,19 @@ class FIFOScheduler(BaseScheduler):
         while self.active:
             time.sleep(self.batch_interval)
 
+            batch_no = getattr(self, "_probe_batch_no", 0) + 1
+            self._probe_batch_no = batch_no
+
             batch = []
             while True:
                 try:
                     llm_syscall = self.get_llm_syscall()
+                    probe.emit(
+                        "batch",
+                        syscall=llm_syscall,
+                        batch_no=batch_no,
+                        batch_pos=len(batch),
+                    )
                     # Add logging here: print(f"Retrieved syscall: {llm_syscall.pid}, Queue size now: {self.llm_queue.qsize()}")
                     batch.append(llm_syscall)
                 except Empty:
@@ -232,6 +242,7 @@ class FIFOScheduler(BaseScheduler):
                     break
 
             if batch:
+                probe.emit("batch_dispatch", batch_no=batch_no, batch_size=len(batch))
                 self._execute_batch_syscalls(batch, self.llm.execute_llm_syscalls, "LLM")
 
     def process_memory_requests(self) -> None:

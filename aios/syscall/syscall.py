@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from aios.memory.manager import MemoryManager
 from aios.syscall import Syscall
 from aios.syscall.llm import LLMSyscall
+from aios.utils import probe
 from aios.syscall.storage import StorageSyscall, storage_syscalls
 from aios.syscall.tool import ToolSyscall
 # MemorySyscall imported locally in methods that use it to avoid circular import
@@ -168,9 +169,11 @@ class SyscallExecutor:
                                 mm.barrier.snapshot(uid)
                             )
 
+            probe.emit("enqueue", syscall=syscall)
+
             if isinstance(syscall, LLMSyscall):
                 global_llm_req_queue_add_message(syscall)
-                print(f"Syscall {syscall.agent_name} added to LLM queue")
+                logger.debug(f"Syscall {syscall.agent_name} added to LLM queue")
                 
             elif isinstance(syscall, StorageSyscall):
                 global_storage_req_queue_add_message(syscall)
